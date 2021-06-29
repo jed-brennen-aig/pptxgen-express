@@ -1,69 +1,123 @@
-const pptxgen = require('pptxgenjs');
-const got = require('got');
-const express = require('express');
-require('dotenv').config()
+const pptxgen = require("pptxgenjs");
+const got = require("got");
+const express = require("express");
+require("dotenv").config();
 const app = express();
 
+const redisClient = require("./redis-client");
+const mockData = require("./mock-data");
 
-const redisClient = require('./redis-client');
+const spacingBorder = [
+  { type: "none" },
+  { type: "none" },
+  { type: "solid", color: "ffffff", pt: 5 },
+  { type: "none" },
+];
 
-const generatePowerpoint = (text) => {
-  // 1. Create a Presentation
-  const pres = new pptxgen();
+const convertTableBodyRows = (tableData) => {
+  const pptRows = [];
+  const colCount = tableData.thead[0].cells.length;
 
-  // 2. Add a Slide to the presentation
-  const slide = pres.addSlide();
+  tableData.tbody &&
+    tableData.tbody.forEach((row) => {
+      if ("title" in row) {
+        pptRows.push([
+          {
+            text: row.title,
+            options: {
+              colspan: colCount,
+              fill: { color: "e8ecf1" },
+              border: spacingBorder,
+            },
+          },
+        ]);
+        row.rows.forEach((groupRow) => {
+          pptRows.push(groupRow.cells.map((cell) => ({ text: cell.value })));
+        });
+      } else if ("cells" in row) {
+        return pptRows.push(row.cells.map((cell) => ({ text: cell.value })));
+      }
+    });
+  return pptRows;
+};
 
-  // 3. Add 1+ objects (Tables, Shapes, etc.) to the Slide
-  slide.addText(text ?? 'Test String', {
-    x: 1.5,
-    y: 1.5,
-    color: '363636',
-    fill: { color: 'F1F1F1' },
-    align: pres.AlignH.center,
-  });
+const convertTableHeaderRows = (tableData) => {
+  const pptRows = [];
 
-  // 4. Save the Presentation
-  return pres.stream();
+  tableData.thead &&
+    tableData.thead.forEach((header) =>
+      pptRows.push(
+        header.cells.map((cell) => ({
+          text: cell.value,
+          options: {
+            border: spacingBorder,
+            bold: true,
+          },
+        }))
+      )
+    );
+
+  return pptRows;
+};
+
+const generatePowerpoint = (data) => {
+  const pptx = new pptxgen();
+
+  for (let i = 0; i < 10; i++) {
+    const rows = [
+      ...convertTableHeaderRows(data),
+      ...convertTableBodyRows(data),
+    ];
+
+    pptx
+      .addSlide({ masterName: "DS.CML_PRODUCTION_INVESTMENT_ACTIVITY" })
+      .addTable(rows, {
+        align: "left",
+        fontFace: "Source Sans Pro",
+        autoPage: true,
+      });
+  }
+
+  return pptx.stream();
+};
+
+const getPptxData = async () => {
+  const cacheKey = "pptx_data";
+  const cacheValue = await redisClient.getAsync(cacheKey);
+  if (!cacheValue) {
+    console.log("FETCHING");
+    const promise = new Promise((resolve, reject) => {
+      setTimeout(() => resolve(mockData), 3000);
+    });
+    const pptxData = await promise;
+    redisClient.setAsync(cacheKey, JSON.stringify(pptxData));
+
+    return pptxData;
+  }
+  console.log("USING CACHE");
+
+  return JSON.parse(cacheValue);
 };
 
 const getPowerPoint = async (req, res, next) => {
   try {
-    const pptxData = await getPptxData();
-    const { title, datasets } = pptxData[process.env.DATA_ID];
-    const keyValue = datasets[0].data[1];
-    const pptx = await generatePowerpoint(`${title}: ${keyValue['key']} - ${keyValue['value']}`);
+    const data = await getPptxData();
+    const pptx = await generatePowerpoint(data.mockTableData);
 
-    res.writeHead(200, { 'Content-disposition': 'attachment;filename=Test.pptx', 'Content-Length': pptx.length });
-    res.end(Buffer.from(pptx, 'binary'));
+    res.writeHead(200, {
+      "Content-disposition": "attachment;filename=Test.pptx",
+      "Content-Length": pptx.length,
+    });
+    res.end(Buffer.from(pptx, "binary"));
   } catch (error) {
     next(error);
   }
 };
 
-const getPptxData = async () => {
-  const cacheKey = 'pptx_data';
-  const cacheValue = await redisClient.getAsync(cacheKey);
-  if (!cacheValue) {
-    console.log('FETCHING');
-    const pptxData = await got.post(process.env.DATA_URL, {
-      headers: {
-        Authorization: `Bearer ${process.env.TOKEN}`,
-      },
-    });
-    redisClient.setAsync(cacheKey, pptxData.body);
+app.get("/powerpoint", getPowerPoint);
 
-    return JSON.parse(pptxData.body);
-  }
-  console.log('USING CACHE');
-
-  return JSON.parse(cacheValue);
-};
-
-app.get('/powerpoint', getPowerPoint);
-
-app.get('/', (req, res) => {
-  return res.send('Hello world');
+app.get("/", (req, res) => {
+  return res.send("Hello world");
 });
 
 const PORT = process.env.PORT || 3000;
